@@ -1,3 +1,4 @@
+import os
 import sys
 import cv2
 import numpy as np
@@ -77,6 +78,11 @@ def generate_eulerian_path(image_path):
 
 # 実行
 if __name__ == "__main__":
-    # コマンドライン引数があればそれを使う、なければ test.png を使う
-    target_file = sys.argv[1] if len(sys.argv) > 1 else 'test.png'
-    generate_eulerian_path(target_file)
+    image_dir = "image" 
+    filename = sys.argv[1] if len(sys.argv) > 1 else 'test.png'
+    target_path = os.path.join(image_dir, filename)
+
+    if os.path.exists(target_path):
+        generate_eulerian_path(target_path)
+    else:
+        print(f"エラー: ファイルが見つかりません -> {target_path}")
