@@ -1,3 +1,4 @@
+import sys
 import cv2
 import numpy as np
 import networkx as nx
@@ -75,4 +76,7 @@ def generate_eulerian_path(image_path):
     plt.show()
 
 # 実行
-generate_eulerian_path('test.png')
+if __name__ == "__main__":
+    # コマンドライン引数があればそれを使う、なければ test.png を使う
+    target_file = sys.argv[1] if len(sys.argv) > 1 else 'test.png'
+    generate_eulerian_path(target_file)
