@@ -6,70 +6,80 @@ import matplotlib.pyplot as plt
 from collections import deque
 
 def generate_point_queue(image_path, epsilon_val=5.0):
-    # 画像の読み込み
     if not os.path.exists(image_path):
         print(f"エラー: ファイル '{image_path}' が見つかりません。")
         return None
 
     img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
     if img is None:
-        print(f"エラー: 画像をデコードできませんでした。形式を確認してください。")
+        print(f"エラー: 画像をデコードできませんでした。")
         return None
 
     # 二値化と細線化
     _, thresh = cv2.threshold(img, 127, 255, cv2.THRESH_BINARY_INV)
-    
     try:
         skeleton = cv2.ximgproc.thinning(thresh)
     except AttributeError:
-        print("エラー: cv2.ximgproc が見つかりません。'pip install opencv-contrib-python' を実行してください。")
-        # ximgprocがない場合の代替手段（簡易的な細線化）
         kernel = np.ones((3,3), np.uint8)
         skeleton = cv2.erode(thresh, kernel, iterations=1)
 
-    # パス抽出
     contours, _ = cv2.findContours(skeleton, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
 
-    # 座標格納
     point_queue = deque()
-    
-    # すでに登録したパスの「端点の集合」を記録するリスト
     processed_endpoints = []
+    tolerance = 10.0  # 往復判定の許容誤差（ピクセル）
+    threshold = 10.0 # 重複パス判定の閾値
 
     for cnt in contours:
         approx = cv2.approxPolyDP(cnt, epsilon_val, closed=False)
         if len(approx) < 2:
             continue
 
-        # このパスの始点と終点を取得
-        start_pt = (int(approx[0][0][0]), int(approx[0][0][1]))
-        end_pt = (int(approx[-1][0][0]), int(approx[-1][0][1]))
+        # 現在のパスをリスト化
+        this_path = [(int(p[0][0]), int(p[0][1])) for p in approx]
         
-        # --- 重複チェック ---
+        # 往復判定
+        num_pts = len(this_path)
+        mid_idx = int(num_pts/ 2)
+        is_perfect_return = True
+        
+        for i in range(1, mid_idx + 1):
+            idx_back = mid_idx - i
+            idx_forw = mid_idx + i
+            if idx_back < 0 or idx_forw >= num_pts:
+                break
+            
+            p_back = np.array(this_path[idx_back])
+            p_forw = np.array(this_path[idx_forw])
+            
+            if np.linalg.norm(p_back - p_forw) > tolerance:
+                is_perfect_return = False
+                break
+
+        # 往復パスなら半分（片道）にする。そうでなければ（円など）そのまま。
+        final_path = this_path[:mid_idx+1] if is_perfect_return else this_path
+
+        # 重複判定
+        start_pt = final_path[0]
+        end_pt = final_path[-1]
         is_duplicate = False
         for old_start, old_end in processed_endpoints:
-            # 始点と始点、終点と終点が近い、あるいは「逆向き（始点と終点）」が近いか判定
             dist1 = np.linalg.norm(np.array(start_pt) - np.array(old_start))
             dist2 = np.linalg.norm(np.array(end_pt) - np.array(old_end))
             dist3 = np.linalg.norm(np.array(start_pt) - np.array(old_end))
             dist4 = np.linalg.norm(np.array(end_pt) - np.array(old_start))
             
-            # 閾値（例: 10ピクセル）以内のズレなら同じ線とみなす
-            threshold = 10.0
             if (dist1 < threshold and dist2 < threshold) or (dist3 < threshold and dist4 < threshold):
                 is_duplicate = True
                 break
         
         if is_duplicate:
-            continue # すでに似た線があるのでスキップ
+            continue
 
-        # 重複していなければ追加
+        # 結果を登録
         processed_endpoints.append((start_pt, end_pt))
-        for i in range(len(approx)):
-            x, y = approx[i][0]
-            point_queue.append((int(x), int(y)))
-            
-        point_queue.append(None)
+        point_queue.extend(final_path)
+        point_queue.append(None) # パスの区切り
 
     return point_queue, img
 
@@ -121,4 +131,4 @@ if __name__ == "__main__":
                     print(f"{p}")
             
             # 表示（消してもいい）
-            # visualize_results(q, original_img)
+            visualize_results(q, original_img)
