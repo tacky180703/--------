@@ -2,133 +2,123 @@ import os
 import sys
 import cv2
 import numpy as np
-import networkx as nx
 import matplotlib.pyplot as plt
-import time
+from collections import deque
 
-def generate_eulerian_path(image_path):
-    start_time = time.time()
+def generate_point_queue(image_path, epsilon_val=5.0):
+    # 画像の読み込み
+    if not os.path.exists(image_path):
+        print(f"エラー: ファイル '{image_path}' が見つかりません。")
+        return None
 
-    # 1. 画像読み込み
     img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
     if img is None:
-        print(f"エラー: 画像ファイル '{image_path}' が見つかりません。")
-        return
+        print(f"エラー: 画像をデコードできませんでした。形式を確認してください。")
+        return None
 
-    # 2. 前処理（二値化・細線化）
+    # 二値化と細線化
     _, thresh = cv2.threshold(img, 127, 255, cv2.THRESH_BINARY_INV)
-    skeleton = cv2.ximgproc.thinning(thresh)
+    
+    try:
+        skeleton = cv2.ximgproc.thinning(thresh)
+    except AttributeError:
+        print("エラー: cv2.ximgproc が見つかりません。'pip install opencv-contrib-python' を実行してください。")
+        # ximgprocがない場合の代替手段（簡易的な細線化）
+        kernel = np.ones((3,3), np.uint8)
+        skeleton = cv2.erode(thresh, kernel, iterations=1)
 
-    # 3. グラフ構築
-    G = nx.Graph()
-    points = np.column_stack(np.where(skeleton > 0))
-    for r, c in points:
-        G.add_node((r, c))
-        for dr in [-1, 0, 1]:
-            for dc in [-1, 0, 1]:
-                if dr == 0 and dc == 0: continue
-                nr, nc = r + dr, c + dc
-                if 0 <= nr < skeleton.shape[0] and 0 <= nc < skeleton.shape[1]:
-                    if skeleton[nr, nc] > 0:
-                        G.add_edge((r, c), (nr, nc))
+    # パス抽出
+    contours, _ = cv2.findContours(skeleton, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
 
-    if len(G.nodes) == 0:
-        print("エラー: 有効な線が検出されませんでした。")
+    # 座標格納
+    point_queue = deque()
+    
+    # すでに登録したパスの「端点の集合」を記録するリスト
+    processed_endpoints = []
+
+    for cnt in contours:
+        approx = cv2.approxPolyDP(cnt, epsilon_val, closed=False)
+        if len(approx) < 2:
+            continue
+
+        # このパスの始点と終点を取得
+        start_pt = (int(approx[0][0][0]), int(approx[0][0][1]))
+        end_pt = (int(approx[-1][0][0]), int(approx[-1][0][1]))
+        
+        # --- 重複チェック ---
+        is_duplicate = False
+        for old_start, old_end in processed_endpoints:
+            # 始点と始点、終点と終点が近い、あるいは「逆向き（始点と終点）」が近いか判定
+            dist1 = np.linalg.norm(np.array(start_pt) - np.array(old_start))
+            dist2 = np.linalg.norm(np.array(end_pt) - np.array(old_end))
+            dist3 = np.linalg.norm(np.array(start_pt) - np.array(old_end))
+            dist4 = np.linalg.norm(np.array(end_pt) - np.array(old_start))
+            
+            # 閾値（例: 10ピクセル）以内のズレなら同じ線とみなす
+            threshold = 10.0
+            if (dist1 < threshold and dist2 < threshold) or (dist3 < threshold and dist4 < threshold):
+                is_duplicate = True
+                break
+        
+        if is_duplicate:
+            continue # すでに似た線があるのでスキップ
+
+        # 重複していなければ追加
+        processed_endpoints.append((start_pt, end_pt))
+        for i in range(len(approx)):
+            x, y = approx[i][0]
+            point_queue.append((int(x), int(y)))
+            
+        point_queue.append(None)
+
+    return point_queue, img
+
+def visualize_results(point_queue, original_img):
+    """
+    生成されたキューの内容を可視化(消してもいい)
+    """
+    if not point_queue:
         return
 
-    if not nx.is_connected(G):
-        largest_cc = max(nx.connected_components(G), key=len)
-        G = G.subgraph(largest_cc).copy()
-
-    # 4. ルート構築（連続性を確保）
-    final_route_nodes = []
-    if nx.has_eulerian_path(G):
-        status_msg = "一筆書きルートが見つかりました！"
-        euler_edges = list(nx.eulerian_path(G))
-        final_route_nodes = [euler_edges[0][0]] + [e[1] for e in euler_edges]
-    else:
-        status_msg = "完全な一筆書き不可。戻り道を含む連続ルートを生成します。"
-        # 深さ優先探索の巡回順（行き止まりで戻る動作を含む）を生成
-        nodes_order = list(nx.dfs_preorder_nodes(G))
-        # 簡易的に隣接ノードを繋ぐ（より厳密な一筆書きにはHierholzer拡張が必要ですが、
-        # まずは連続性を優先します）
-        final_route_nodes = nodes_order
-
-    # 5. 直線の間引き（ショートカット機能）
-    # 
-    # --- 頂点の間引き（角度許容版） ---
-    simplified_nodes = []
-    if len(final_route_nodes) > 0:
-        simplified_nodes.append(final_route_nodes[0])
-        
-        # 許容する角度（度数法）。この値を大きくすると、よりカクカクした線も直線とみなします。
-        angle_threshold = 10.0 
-
-        for i in range(1, len(final_route_nodes) - 1):
-            prev = final_route_nodes[i-1]
-            curr = final_route_nodes[i]
-            nxt  = final_route_nodes[i+1]
-            
-            # ベクトル1と2
-            v1 = np.array([curr[1] - prev[1], curr[0] - prev[0]])
-            v2 = np.array([nxt[1] - curr[1], nxt[0] - curr[0]])
-            
-            # ベクトルの長さを計算
-            norm1 = np.linalg.norm(v1)
-            norm2 = np.linalg.norm(v2)
-            
-            if norm1 > 0 and norm2 > 0:
-                # 内積から角度（ラジアン）を求める
-                cos_theta = np.dot(v1, v2) / (norm1 * norm2)
-                # 数値誤差で1を超えないようクリップ
-                cos_theta = np.clip(cos_theta, -1.0, 1.0)
-                angle = np.degrees(np.arccos(cos_theta))
-                
-                # 指定した角度以上の変化がある場合のみ「角」として保存
-                if angle > angle_threshold:
-                    simplified_nodes.append(curr)
-        
-        simplified_nodes.append(final_route_nodes[-1])
-
-    # 6. セグメント化 [開始x, 開始y, 終了x, 終了y]
-    route_data = []
-    for i in range(len(simplified_nodes) - 1):
-        p1 = simplified_nodes[i]
-        p2 = simplified_nodes[i+1]
-        route_data.append([p1[1], p1[0], p2[1], p2[0]])
-
-    end_time = time.time()
-    elapsed_time = end_time - start_time
-
-    # 7. 結果表示
-    print("-" * 30)
-    print(status_msg)
-    print(f"処理にかかった時間: {elapsed_time:.4f} 秒")
-    print(f"圧縮前の点数: {len(final_route_nodes)}")
-    print(f"圧縮後のセグメント数: {len(route_data)}")
-    print("-" * 30)
+    plt.figure(figsize=(10, 8))
+    plt.imshow(original_img, cmap='gray')
     
-    print("\n--- ルートデータ [開始x, 開始y, 終了x, 終了y] ---")
-    for segment in route_data:
-        print(segment)
+    q_list = list(point_queue)
+    
+    curr_x, curr_y = [], []
+    point_count = 0
 
-    # 8. 可視化
-    x_coords = [p[1] for p in simplified_nodes]
-    y_coords = [p[0] for p in simplified_nodes]
-    plt.figure(figsize=(8, 8))
-    plt.imshow(img, cmap='gray')
-    plt.plot(x_coords, y_coords, color='red', linewidth=1, alpha=0.7)
-    plt.scatter(x_coords[0], y_coords[0], color='green', s=100, label='Start')
-    plt.scatter(x_coords[-1], y_coords[-1], color='blue', s=100, label='End')
-    plt.title(f"Compressed Path: {len(route_data)} segments")
-    plt.legend()
+    for p in q_list:
+        if p is None:
+            plt.plot(curr_x, curr_y, marker='o', markersize=3, linewidth=2, label=f"Path Segment" if point_count==0 else "")
+            curr_x, curr_y = [], []
+        else:
+            curr_x.append(p[0])
+            curr_y.append(p[1])
+            point_count += 1
+
+    plt.title(f"Generated Path (Total Points: {point_count})")
+    plt.xlabel("X [pixel]")
+    plt.ylabel("Y [pixel]")
     plt.show()
 
 if __name__ == "__main__":
-    image_dir = "image" 
-    filename = sys.argv[1] if len(sys.argv) > 1 else 'test.png'
-    target_path = os.path.join(image_dir, filename)
+    image_dir = "image"
+    image_filename = sys.argv[1] if len(sys.argv) > 1 else 'test.png'
+    target_path = os.path.join(image_dir, image_filename)
+    
     if os.path.exists(target_path):
-        generate_eulerian_path(target_path)
-    else:
-        print(f"エラー: ファイルが見つかりません -> {target_path}")
+        # ルート（巡る点を順に格納したキュー)生成
+        result = generate_point_queue(target_path, epsilon_val=8.0)
+        
+        if result:  
+            # 出力（x,y)     
+            q, original_img = result     
+            temp_q = q.copy()
+            while temp_q:
+                p = temp_q.popleft()
+                if p is not None:
+                    print(f"{p}")
+            
+            # 表示（消してもいい）
+            # visualize_results(q, original_img)
